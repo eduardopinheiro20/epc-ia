@@ -15,6 +15,14 @@ def agendar_coleta():
     print("Iniciando coleta agendada —", datetime.now())
     collect_range(days_back=3, days_forward=2)  # coleta curta diária
 
+
+# roda todo dia às 07:10
+@scheduler.scheduled_job('cron', hour=7, minute=10)
+def gerar_bilhete():
+    print("Gerando bilhete diário —", datetime.now())
+    from src.run_generator import ticket
+
+
 if __name__ == "__main__":
     print("Scheduler started. Will collect everyday at 07:00 America/Sao_Paulo.")
     scheduler.start()

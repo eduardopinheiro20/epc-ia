@@ -1,4 +1,4 @@
-#!/home/eduardo-pinheiro/Documents/epc-ia-bet/epc-ia/venv/bin/python3
+#!/home/eduardo-pinheiro/Documents/epc-ia-bet/epc-ia/venv/bin/python3.10
 # -*- coding: utf-8 -*-
 import re
 import sys

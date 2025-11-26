@@ -3,53 +3,106 @@ import os
 import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from sqlalchemy.orm import Session
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-# Importa seu modelo Fixture
-from src.db import Fixture, Base, SessionLocal
+# MODELOS REAIS DO BANCO
+from src.db import (
+    SessionLocal,
+    League,
+    Team,
+    Fixture,
+    create_tables,
+)
 
 load_dotenv()
 
 API_KEY = os.getenv("API_FOOTBALL_KEY")
 BASE_URL = os.getenv("BASE_URL")
-DATABASE_URL = os.getenv("DATABASE_URL")
+HEADERS = {"x-apisports-key": API_KEY}
 
-HEADERS = {
-    "x-apisports-key": API_KEY
-}
+# LIGAS GRANDES
+LIGAS_PERMITIDAS = [
+    39,   # Premier League
+    140,  # La Liga
+    135,  # Serie A
+    61,   # Ligue 1
+    78,   # Bundesliga
+    40,   # Championship
+    94,   # Primeira Liga
+    144,  # Jupiler Pro League
+    128,  # Liga Argentina
+    71,   # Brasileirão A
+    72,   # Brasileirão B
+    
+    #    Competições UEFA
+    2,    # Champions League
+    3,    # Europa League
+    848   # Conference League
+]
 
-# Criar engine e sessão do banco
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
+session = SessionLocal()
 
-# =====================================================
-# Funções da API
-# =====================================================
+
+# ============================================================
+# API GET SEGURO
+# ============================================================
 
 def api_get(url, params=None):
-    """Handler seguro da API, com retry."""
-    for i in range(3):
+    for _ in range(3):
         try:
             r = requests.get(url, headers=HEADERS, params=params, timeout=10)
             if r.status_code == 200:
                 return r.json()
-            else:
-                print(f"Erro API ({r.status_code}): {r.text}")
+            print("API ERROR:", r.status_code, r.text[:200])
         except Exception as e:
             print("Erro request:", e)
         time.sleep(1)
     return None
 
 
-def get_team_last_matches(team_id: int, limit: int = 5):
-    """Retorna últimos jogos do time (máximo 5 no plano free)."""
+# ============================================================
+# UPSERT LEAGUE E TEAM (IGUAL AO v1)
+# ============================================================
+
+def upsert_league(api_league):
+    api_id = api_league["id"]
+    name = api_league.get("name")
+    country = api_league.get("country")
+
+    league = session.query(League).filter_by(api_id=api_id).first()
+    if league:
+        return league
+
+    league = League(api_id=api_id, name=name, country=country)
+    session.add(league)
+    session.commit()
+    session.refresh(league)
+    return league
+
+
+def upsert_team(api_team):
+    api_id = api_team["id"]
+    name = api_team.get("name")
+    country = api_team.get("country", None)
+
+    team = session.query(Team).filter_by(api_id=api_id).first()
+    if team:
+        return team
+
+    team = Team(api_id=api_id, name=name, country=country)
+    session.add(team)
+    session.commit()
+    session.refresh(team)
+    return team
+
+
+# ============================================================
+# ESTATÍSTICAS (V2)
+# ============================================================
+
+def get_last_matches(team_id, limit=5):
     url = f"{BASE_URL}/fixtures"
-    params = {
-        "team": team_id,
-        "last": limit
-    }
+    params = {"team": team_id, "last": limit}
+
     data = api_get(url, params)
     if not data:
         return []
@@ -57,145 +110,162 @@ def get_team_last_matches(team_id: int, limit: int = 5):
     return data.get("response", [])
 
 
-def calculate_stats_from_last_matches(matches, team_id):
-    """Retorna:
-    - avg_scored
-    - avg_conceded
-    - recent_for (lista)
-    - recent_against (lista)
-    """
+def compute_stats(matches, team_id):
     gols_for = []
     gols_against = []
 
     for m in matches:
-        home = m["teams"]["home"]["id"]
-        away = m["teams"]["away"]["id"]
+        if "goals" not in m:
+            continue
 
-        g_home = m["goals"]["home"] if m["goals"]["home"] is not None else 0
-        g_away = m["goals"]["away"] if m["goals"]["away"] is not None else 0
+        home_id = m["teams"]["home"]["id"]
+        g_home = m["goals"]["home"] or 0
+        g_away = m["goals"]["away"] or 0
 
-        if team_id == home:
+        if home_id == team_id:
             gols_for.append(g_home)
             gols_against.append(g_away)
         else:
             gols_for.append(g_away)
             gols_against.append(g_home)
 
-    if len(gols_for) == 0:
+    if not gols_for:
         return 0, 0, [], []
 
-    avg_scored = sum(gols_for) / len(gols_for)
-    avg_conceded = sum(gols_against) / len(gols_against)
+    avg_scored = round(sum(gols_for) / len(gols_for), 3)
+    avg_conceded = round(sum(gols_against) / len(gols_against), 3)
 
-    return (
-        round(avg_scored, 3),
-        round(avg_conceded, 3),
-        gols_for[-5:],          # Últimos (máximo) 5 jogos
-        gols_against[-5:]
-    )
+    return avg_scored, avg_conceded, gols_for, gols_against
 
 
-def get_fixtures_by_date(date_str):
-    url = f"{BASE_URL}/fixtures"
-    params = {
-        "date": date_str,
-        "timezone": "America/Sao_Paulo"
-    }
-    data = api_get(url, params)
-    if not data:
-        return []
+# ============================================================
+# SALVAR FIXTURE (COM TUDO: IGUAL v1 + v2)
+# ============================================================
 
-    return data.get("response", [])
+def save_fixture(fx):
+
+    if "fixture" not in fx or not fx["fixture"].get("id"):
+        print("[IGNORADO] fixture inválido")
+        return
+
+    if "league" not in fx:
+        print("[IGNORADO] sem liga")
+        return
+
+    league_api = fx["league"]
+    league_id = league_api["id"]
+
+    if league_id not in LIGAS_PERMITIDAS:
+        print("[IGNORADO] liga não permitida:", league_api.get("name"))
+        return
+
+    # -----------------------------------
+    # CAMPOS BÁSICOS DO FIXTURE
+    # -----------------------------------
+    api_id = fx["fixture"]["id"]
+    date = datetime.fromisoformat(fx["fixture"]["date"].replace("Z", "+00:00"))
+    status = fx["fixture"]["status"].get("short")
+
+    # -----------------------------------
+    # GOLS → FALTAVA NO V2
+    # -----------------------------------
+    home_goals = fx["goals"]["home"] if fx.get("goals") else None
+    away_goals = fx["goals"]["away"] if fx.get("goals") else None
+
+    # -----------------------------------
+    # UPSERT LEAGUE e TEAM
+    # -----------------------------------
+    league = upsert_league(league_api)
+    home_team = upsert_team(fx["teams"]["home"])
+    away_team = upsert_team(fx["teams"]["away"])
+
+    # -----------------------------------
+    # ESTATÍSTICAS DOS ÚLTIMOS JOGOS
+    # -----------------------------------
+    home_last = get_last_matches(home_team.api_id)
+    away_last = get_last_matches(away_team.api_id)
+
+    (
+        home_avg_s,
+        home_avg_c,
+        home_recent_for,
+        home_recent_against
+    ) = compute_stats(home_last, home_team.api_id)
+
+    (
+        away_avg_s,
+        away_avg_c,
+        away_recent_for,
+        away_recent_against
+    ) = compute_stats(away_last, away_team.api_id)
+
+    print(f"[Fixture {api_id}] {league_api['name']} | Stats (OK)")
+
+    # -----------------------------------
+    # SALVAR NO BANCO
+    # -----------------------------------
+    fix = session.query(Fixture).filter_by(api_id=api_id).first()
+    if not fix:
+        fix = Fixture(api_id=api_id)
+        session.add(fix)
+
+    fix.league_id = league.id
+    fix.date = date
+    fix.status = status
+
+    fix.home_team_id = home_team.id
+    fix.away_team_id = away_team.id
+
+    fix.home_goals = home_goals
+    fix.away_goals = away_goals
+
+    fix.home_avg_scored = home_avg_s
+    fix.home_avg_conceded = home_avg_c
+    fix.home_recent_for = home_recent_for
+    fix.home_recent_against = home_recent_against
+
+    fix.away_avg_scored = away_avg_s
+    fix.away_avg_conceded = away_avg_c
+    fix.away_recent_for = away_recent_for
+    fix.away_recent_against = away_recent_against
+
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        print("[ERRO] ao salvar fixture:", e)
 
 
-# =====================================================
-# PROCESSAR E SALVAR FIXTURE
-# =====================================================
+# ============================================================
+# LOOP DE COLETA
+# ============================================================
 
-def save_fixture(session: Session, f):
-    """Cria ou atualiza fixture no banco, com todas as novas colunas."""
-    fix_id = f["fixture"]["id"]
-    league = f["league"]["name"]
-
-    home_id = f["teams"]["home"]["id"]
-    away_id = f["teams"]["away"]["id"]
-
-    date_str = f["fixture"]["date"]
-    dt = datetime.fromisoformat(date_str.replace("Z", ""))
-
-    # Buscar últimos jogos e calcular stats
-    home_last = get_team_last_matches(home_id)
-    away_last = get_team_last_matches(away_id)
-
-    home_avg_s, home_avg_c, home_for, home_against = calculate_stats_from_last_matches(home_last, home_id)
-    away_avg_s, away_avg_c, away_for, away_against = calculate_stats_from_last_matches(away_last, away_id)
-
-    print(f"[Fixture {fix_id}] {league} | Stats calculadas.")
-
-    # Verificar se já existe
-    db_fix = session.query(Fixture).filter(Fixture.id == fix_id).first()
-
-    if not db_fix:
-        db_fix = Fixture(id=fix_id)
-        session.add(db_fix)
-
-    # Atualizar campos
-    db_fix.league_name = league
-    db_fix.date = dt
-
-    db_fix.home_id = home_id
-    db_fix.away_id = away_id
-
-    db_fix.home_avg_scored = home_avg_s
-    db_fix.home_avg_conceded = home_avg_c
-    db_fix.home_recent_for = home_for
-    db_fix.home_recent_against = home_against
-
-    db_fix.away_avg_scored = away_avg_s
-    db_fix.away_avg_conceded = away_avg_c
-    db_fix.away_recent_for = away_for
-    db_fix.away_recent_against = away_against
-
-    session.commit()
-
-
-# =====================================================
-# EXECUTAR COLETA DIÁRIA
-# =====================================================
-
-def collect(days_back=1, days_forward=1):
-    """
-    Coleta fixtures entre:
-    hoje - days_back  … até hoje + days_forward
-    """
-    session = SessionLocal()
-
+def collect(days_back=2, days_forward=2):
     today = datetime.now().date()
 
     for delta in range(-days_back, days_forward + 1):
         d = today + timedelta(days=delta)
         d_str = d.strftime("%Y-%m-%d")
-        print(f"--- Coletando data {d_str} ---")
+        print(f"\n--- Coletando {d_str} ---")
 
-        fixtures = get_fixtures_by_date(d_str)
-        if not fixtures:
+        url = f"{BASE_URL}/fixtures"
+        params = {"date": d_str, "timezone": "America/Sao_Paulo"}
+
+        data = api_get(url, params)
+        if not data:
             print("Nenhum jogo encontrado.")
             continue
 
-        for f in fixtures:
-            try:
-                save_fixture(session, f)
-                time.sleep(1)  # evitar limite da API
-            except Exception as e:
-                print("[ERRO]", e)
-
-    session.close()
+        for fx in data.get("response", []):
+            save_fixture(fx)
+            time.sleep(0.6)
 
 
-# =====================================================
+# ============================================================
 # MAIN
-# =====================================================
+# ============================================================
 
 if __name__ == "__main__":
+    create_tables()
     print("=== EPC-IA Collect v2 ===")
     collect(days_back=2, days_forward=2)

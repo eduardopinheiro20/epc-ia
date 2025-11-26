@@ -20,11 +20,16 @@ LIGAS_PERMITIDAS = [
     61,   # Ligue 1
     78,   # Bundesliga
     40,   # Championship
-    94,   # Primeira Liga (Portugal)
+    94,   # Primeira Liga
     144,  # Jupiler Pro League
     128,  # Liga Argentina
     71,   # Brasileirão A
-    72    # Brasileirão B
+    72,   # Brasileirão B
+    
+    #    Competições UEFA
+    2,    # Champions League
+    3,    # Europa League
+    848   # Conference League
 ]
 
 session = SessionLocal()
@@ -110,12 +115,6 @@ def fetch_standings(league_id, season):
         return []
     return r.json().get("response", [])
 
-# def collect_for_date(date_obj):
-#     date_str = date_obj.strftime("%Y-%m-%d")
-#     print("Coletando fixtures para", date_str)
-#     fixtures = fetch_fixtures_date(date_str)
-#     for fx in fixtures:
-#         save_fixture_from_api(fx)
 
 def collect_for_date(date_obj):
     date_str = date_obj.strftime("%Y-%m-%d")
