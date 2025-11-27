@@ -1,7 +1,7 @@
 # src/api/service.py
 
 from pydantic import BaseModel
-from src.db import SessionLocal, Ticket, Audit
+from src.db import SessionLocal, Standing, Ticket, Audit
 import hashlib
 import json
 

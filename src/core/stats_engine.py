@@ -1,6 +1,8 @@
+from requests import Session
 from sqlalchemy import func
 from src.db import SessionLocal, Fixture
 from math import exp, factorial
+from datetime import datetime, timedelta
 
 session = SessionLocal()
 
@@ -113,4 +115,167 @@ def analyze_match(home_id, away_id, matches_limit=10):
         "p_under_35": prob_total_goals_under(exp_home, exp_away, 3),
         "p_under_45": prob_total_goals_under(exp_home, exp_away, 4),
         "p_under_ht_15": prob_total_goals_under(exp_home / 2, exp_away / 2, 1),
+    }
+
+
+# ============================================================
+# FORMA RECENTE (V, E, D) E MÉDIAS EXTENDIDAS
+# ============================================================
+
+def get_extended_team_stats(db: Session, team_id: int, limit: int = 15):
+    """
+    Retorna estatísticas profundas do time:
+    - forma V/E/D
+    - força ofensiva e defensiva (médias)
+    - médias móveis (5, 10, 15)
+    - % under 3.5, under 4.5, over 2.5
+    - volatilidade ofensiva
+    """
+
+    matches = (
+        db.query(Fixture)
+        .filter(
+            (Fixture.home_team_id == team_id) |
+            (Fixture.away_team_id == team_id),
+            Fixture.status == "FT",
+        )
+        .order_by(Fixture.date.desc())
+        .limit(limit)
+        .all()
+    )
+
+    if not matches:
+        return None
+
+    # -------------------------------------
+    # Estatísticas base
+    # -------------------------------------
+    forma = []  # ["V", "E", "D"]
+    gols_for = []
+    gols_against = []
+
+    under35 = 0
+    under45 = 0
+    over25 = 0
+
+    for m in matches:
+        if m.home_team_id == team_id:
+            gf = m.home_goals or 0
+            ga = m.away_goals or 0
+        else:
+            gf = m.away_goals or 0
+            ga = m.home_goals or 0
+
+        # forma
+        if gf > ga:
+            forma.append("V")
+        elif gf == ga:
+            forma.append("E")
+        else:
+            forma.append("D")
+
+        gols_for.append(gf)
+        gols_against.append(ga)
+
+        total = gf + ga
+        if total <= 3:
+            under35 += 1
+        if total <= 4:
+            under45 += 1
+        if total >= 3:
+            over25 += 1
+
+    jogos = len(matches)
+
+    stats = {
+        "forma": forma,
+        "forma_str": " ".join(forma[:6]),
+        "jogos_analisados": jogos,
+
+        # médias gerais
+        "avg_scored": sum(gols_for) / jogos,
+        "avg_conceded": sum(gols_against) / jogos,
+
+        # médias móveis
+        "avg5_scored": sum(gols_for[:5]) / min(5, jogos),
+        "avg5_conceded": sum(gols_against[:5]) / min(5, jogos),
+
+        "avg10_scored": sum(gols_for[:10]) / min(10, jogos),
+        "avg10_conceded": sum(gols_against[:10]) / min(10, jogos),
+
+        # volatilidade (quanto o time oscila)
+        "volatilidade_ofensiva":
+            (max(gols_for) - min(gols_for)) if jogos > 1 else 0,
+
+        # frequências
+        "under35_rate": under35 / jogos,
+        "under45_rate": under45 / jogos,
+        "over25_rate": over25 / jogos,
+    }
+
+    return stats
+
+
+# ============================================================
+# ESTATÍSTICAS DA LIGA
+# ============================================================
+
+def get_league_patterns(db: Session, league_id: int, limit: int = 200):
+    """
+    Estatísticas globais da liga:
+    - média de gols
+    - tendência under/over
+    - volatilidade
+    """
+    matches = (
+        db.query(Fixture)
+        .filter(Fixture.league_id == league_id, Fixture.status == "FT")
+        .order_by(Fixture.date.desc())
+        .limit(limit)
+        .all()
+    )
+
+    if not matches:
+        return None
+
+    totals = [ (m.home_goals or 0) + (m.away_goals or 0) for m in matches ]
+
+    under35 = len([t for t in totals if t <= 3])
+    under45 = len([t for t in totals if t <= 4])
+    over25  = len([t for t in totals if t >= 3])
+
+    stats = {
+        "jogos": len(matches),
+        "media_gols": sum(totals) / len(matches),
+        "volatilidade": max(totals) - min(totals),
+
+        "under35_rate": under35 / len(matches),
+        "under45_rate": under45 / len(matches),
+        "over25_rate": over25 / len(matches),
+    }
+
+    return stats
+
+
+# ============================================================
+# FUNÇÃO FINAL: COMBO DE ESTATÍSTICAS DO JOGO
+# ============================================================
+
+def compute_match_features(db: Session, fixture: Fixture):
+    """
+    Retorna um pacote completo de informações do jogo para o gerador:
+    - estatísticas avançadas do time mandante
+    - estatísticas avançadas do time visitante
+    - padrão da liga
+    - ajuste de confiança baseado nos times
+    """
+
+    home = get_extended_team_stats(db, fixture.home_team_id)
+    away = get_extended_team_stats(db, fixture.away_team_id)
+    league_stats = get_league_patterns(db, fixture.league_id)
+
+    return {
+        "home": home,
+        "away": away,
+        "league": league_stats,
     }
