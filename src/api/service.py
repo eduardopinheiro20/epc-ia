@@ -1,7 +1,7 @@
 # src/api/service.py
 
 from pydantic import BaseModel
-from src.db import SessionLocal, Standing, Ticket, Audit
+from src.db import Fixture, SessionLocal, Standing, Ticket, Audit, TicketSelection
 import hashlib
 import json
 
@@ -64,3 +64,4 @@ def save_ticket_to_db(ticket: dict, mode: int = 1, status: str = "PUBLISHED"):
 
     finally:
         db.close()
+        

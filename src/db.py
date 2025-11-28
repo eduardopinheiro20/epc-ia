@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    create_engine, Column, Integer, String, DateTime, ForeignKey,
+    Boolean, create_engine, Column, Integer, String, DateTime, ForeignKey,
     Float, Text, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import JSON
@@ -132,15 +132,49 @@ class Audit(Base):
 class Ticket(Base):
     __tablename__ = "tickets"
     id = Column(Integer, primary_key=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    mode = Column(Integer)
-    target_odd = Column(Float)
-    combined_odd = Column(Float)
-    combined_prob = Column(Float)
-    selections = Column(Text)  # json
-    status = Column(String)
-    signature = Column(String, unique=True, index=True)
+    created_by = Column(String, nullable=True)   # opcional: user/email
+    saved_at = Column(DateTime(timezone=True), server_default=func.now())
+    status = Column(String, default="PENDING")   # PENDING, FINISHED
+    result = Column(String, nullable=True)        # GREEN, RED, UNKNOWN
+    final_odd = Column(Float, nullable=False)
+    combined_prob = Column(Float, nullable=True)
+    applied_to_bankroll = Column(Boolean, default=False)  # se já foi aplicada na banca
+    bankroll_id = Column(Integer, ForeignKey("bankrolls.id"), nullable=True)
+    meta = Column(JSON, nullable=True)  # extra (motivos, explanation)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    signature = Column(String, unique=True, index=True)   # <-- ESSA LINHA É A QUE FALTA
+    bankroll = relationship("Bankroll")
 
+# ============================================================
+# TICKET SELECTIONS
+# ============================================================    
+    
+class TicketSelection(Base):
+    __tablename__ = "ticket_selections"
+    id = Column(Integer, primary_key=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id", ondelete="CASCADE"))
+    fixture_id = Column(Integer, ForeignKey("fixtures.id"))
+    market = Column(String)
+    odd = Column(Float)
+    prob = Column(Float)
+    home_name = Column(String)
+    away_name = Column(String)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    ticket = relationship("Ticket", backref="selections")
+
+# ============================================================
+# Bankroll
+# ============================================================
+
+class Bankroll(Base):
+    __tablename__ = "bankrolls"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, default="Main")
+    initial_amount = Column(Float, default=100.0)
+    current_amount = Column(Float, default=100.0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 # ============================================================
 # CREATE TABLES

@@ -5,12 +5,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from sqlalchemy.orm import joinedload
-from src.db import SessionLocal, Fixture, Ticket
+from src.db import SessionLocal, Fixture, Ticket, TicketSelection, Bankroll
 from src.core.generator import find_ticket_for_target, explain_ticket
 from src.core.stats_engine import compute_stats
-from src.api.service import SaveTicketRequest, save_ticket_to_db   # IMPORTANTE
+from src.api.service import SaveTicketRequest, save_ticket_to_db  
+from datetime import datetime
+from sqlalchemy.orm import joinedload
 import json
-
+import hashlib
 
 app = FastAPI(title="EPC-IA Betting AI")
 
@@ -51,67 +53,179 @@ def bilhete_do_dia(mode: int = 1, target_odd: float = 1.15, days: int = 2):
 # ====================================================================
 #  SALVAR BILHETE — Chamado pelo SPRING QUANDO O USUÁRIO CLICA “SALVAR”
 # ====================================================================
+
 @app.post("/salvar-bilhete")
-def salvar_bilhete(req: dict):
-    ticket = req.get("ticket")
-    result = save_ticket_to_db(ticket, mode=ticket.get("mode", 1))
-    return {
-        "saved": True,
-        "ticket_id": result["id"],
-        "duplicate": result["duplicate"]
-    }
+def save_ticket(data: dict):
+    db = SessionLocal()
 
+    try:
+        t = data.get("ticket")
+        if not t:
+            raise HTTPException(status_code=400, detail="Ticket ausente.")
+
+        selections = t.get("selections", [])
+        final_odd = t.get("final_odd")
+        combined_prob = t.get("combined_prob")
+
+        # ---- CALCULA A ASSINATURA AQUI DENTRO ----
+        signature_raw = json.dumps(selections, sort_keys=True) + str(final_odd)
+        signature = hashlib.md5(signature_raw.encode()).hexdigest()
+
+        # Verifica duplicata ANTES de salvar
+        existing = db.query(Ticket).filter_by(signature=signature).first()
+        if existing:
+            return {"saved": True, "ticket_id": existing.id, "duplicate": True}
+
+        meta = {
+            "explanation": t.get("explanation"),
+            "system_recommendation": t.get("system_recommendation"),
+            "confidence_formatted": t.get("confidence_formatted"),
+        }
+
+        # Cria Ticket
+        ticket = Ticket(
+            created_by="SYSTEM",
+            status="PENDING",
+            final_odd=final_odd,
+            combined_prob=combined_prob,
+            applied_to_bankroll=False,
+            bankroll_id=None,
+            meta=meta,
+            signature=signature
+        )
+        db.add(ticket)
+        db.flush()  # obter ticket.id
+
+        # Criar selections
+        for s in selections:
+            ts = TicketSelection(
+                ticket_id=ticket.id,
+                fixture_id=s["fixture_id"],
+                market=s["market"],
+                odd=s["odd"],
+                prob=s["prob"],
+                home_name=s["home"],
+                away_name=s["away"]
+            )
+            db.add(ts)
+
+        db.commit()
+
+        return {"saved": True, "ticket_id": ticket.id}
+
+    except Exception as e:
+        db.rollback()
+        print("Erro ao salvar ticket:", e)
+        raise HTTPException(status_code=500, detail="Erro ao salvar ticket.")
+
+    finally:
+        db.close()
 
 # ====================================================================
-#  HISTÓRICO DE TICKETS
-# ====================================================================
+#  HISTÓRICO DE TICKETS 
+
 @app.get("/historico-tickets")
 def historico_tickets(
     page: int = 1,
     size: int = 20,
-    start: str = None,
-    end: str = None
+    start: str | None = None,
+    end: str | None = None
 ):
     db = SessionLocal()
 
-    query = db.query(Ticket)
+    try:
+        query = (
+            db.query(Ticket)
+            .options(joinedload(Ticket.selections))
+        )
 
-    # FILTRAR POR DATA
-    if start:
-        start_dt = datetime.fromisoformat(start)
-        query = query.filter(Ticket.created_at >= start_dt)
+        # ------------------------------
+        # FILTRO POR DATA (usando saved_at)
+        # ------------------------------
+        if start:
+            try:
+                dt = datetime.fromisoformat(start)
+                query = query.filter(Ticket.saved_at >= dt)
+            except:
+                pass
 
-    if end:
-        end_dt = datetime.fromisoformat(end)
-        query = query.filter(Ticket.created_at <= end_dt)
+        if end:
+            try:
+                dt = datetime.fromisoformat(end)
+                query = query.filter(Ticket.saved_at <= dt)
+            except:
+                pass
 
-    total = query.count()
+        total = query.count()
 
-    # PAGINAÇÃO REAL
-    tickets = (
-        query.order_by(Ticket.created_at.desc())
-        .offset((page - 1) * size)
-        .limit(size)
-        .all()
-    )
+        tickets = (
+            query.order_by(Ticket.saved_at.desc())
+            .offset((page - 1) * size)
+            .limit(size)
+            .all()
+        )
 
-    items = []
-    for t in tickets:
-        items.append({
-            "id": t.id,
-            "created_at": t.created_at,
-            "combined_odd": t.combined_odd,
-            "combined_prob": t.combined_prob,
-            "selections": json.loads(t.selections)
-        })
+        items = []
 
-    return {
-        "total": total,
-        "page": page,
-        "size": size,
-        "pages": (total + size - 1) // size,
-        "items": items
-    }
+        for t in tickets:
+
+            # DATA DO TICKET (conversão segura)
+            saved_at = (
+                t.saved_at.isoformat()
+                if getattr(t, "saved_at", None)
+                else None
+            )
+
+            # FINAL ODD
+            final_odd = float(t.final_odd) if t.final_odd else None
+
+            # PROBABILIDADE COMBINADA
+            combined_prob = (
+                float(t.combined_prob)
+                if t.combined_prob is not None
+                else None
+            )
+
+            # ------------------------------
+            # CONSTRUIR SELEÇÕES CORRETAMENTE
+            # ------------------------------
+            selections = []
+            for s in getattr(t, "selections", []):
+                selections.append({
+                    "id": s.id,
+                    "fixture_id": s.fixture_id,
+                    "home": s.home_name,
+                    "away": s.away_name,
+                    "market": s.market,
+                    "odd": float(s.odd),
+                    "prob": float(s.prob),
+                })
+
+            # ------------------------------
+            # ADICIONAR AO OBJETO FINAL
+            # ------------------------------
+            items.append({
+                "id": t.id,
+                "saved_at": saved_at,
+                "status": t.status,       # PENDING / FINISHED
+                "result": t.result,       # GREEN / RED
+                "final_odd": final_odd,
+                "combined_prob": combined_prob,
+                "selections": selections,
+                "meta": t.meta
+            })
+
+        return {
+            "total": total,
+            "page": page,
+            "size": size,
+            "pages": (total + size - 1) // size,
+            "items": items
+        }
+
+    finally:
+        db.close()
+
 
 
 # ====================================================================
