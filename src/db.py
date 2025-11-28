@@ -142,7 +142,7 @@ class Ticket(Base):
     bankroll_id = Column(Integer, ForeignKey("bankrolls.id"), nullable=True)
     meta = Column(JSON, nullable=True)  # extra (motivos, explanation)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    signature = Column(String, unique=True, index=True)   # <-- ESSA LINHA É A QUE FALTA
+    signature = Column(String, unique=True, index=True)  
     bankroll = relationship("Bankroll")
 
 # ============================================================
