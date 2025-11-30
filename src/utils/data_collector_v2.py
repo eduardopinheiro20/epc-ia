@@ -28,6 +28,7 @@ LIGAS_PERMITIDAS = [
     135,  # Serie A
     61,   # Ligue 1
     78,   # Bundesliga
+    79,   # Bundesliga 2 
     40,   # Championship
     94,   # Primeira Liga
     144,  # Jupiler Pro League
@@ -216,6 +217,45 @@ def update_team_stats_on_fixtures(team_db_id, avg_s, avg_c, recent_for, recent_a
     finally:
         db.close()
 
+def api_get_fixture_statistics(fixture_api_id):
+    """Busca estatísticas do fixture na API-Football (se disponível no plano free)."""
+    url = f"{BASE_URL}/fixtures/statistics"
+    params = {"fixture": fixture_api_id}
+    data = api_get(url, params)
+    if not data:
+        return None
+    return data.get("response", [])
+
+
+# ============================================================
+# MatchStatistics
+# ============================================================
+def upsert_match_statistics(db, fixture_id, team_db_id, stats):
+    """Cria ou atualiza entrada em MatchStatistics para o time e fixture."""
+    from src.db import MatchStatistics  # importar aqui para evitar ciclos
+
+    record = (
+        db.query(MatchStatistics)
+        .filter_by(fixture_id=fixture_id, team_id=team_db_id)
+        .first()
+    )
+
+    if not record:
+        record = MatchStatistics(
+            fixture_id=fixture_id,
+            team_id=team_db_id
+        )
+        db.add(record)
+
+    # Setar todas as propriedades, somente se existir no dict
+    for key, value in stats.items():
+        setattr(record, key, value)
+
+    db.commit()
+    db.refresh(record)
+
+    return record
+
 
 # ============================================================
 # SALVAR FIXTURE (COM TUDO: IGUAL v1 + v2) — atualizado
@@ -318,6 +358,240 @@ def save_fixture(fx):
         fix.away_avg_conceded = away_avg_c
         fix.away_recent_for = away_recent_for
         fix.away_recent_against = away_recent_against
+        
+        # -----------------------------------
+        # TENTAR BUSCAR ESTATÍSTICAS DA PARTIDA NA API (FREE)
+        # -----------------------------------
+        stats_api = None
+        if status not in ["NS", "TBD"]:  # só busca quando a partida começou ou terminou
+            stats_api = api_get_fixture_statistics(api_id)
+
+        # inicializar tudo como None (seguro para partidas futuras)
+        home_shots_total = away_shots_total = None
+        home_shots_on_target = away_shots_on_target = None
+        home_corners = away_corners = None
+        home_yellow = away_yellow = None
+        home_red = away_red = None
+        home_possession = away_possession = None
+        home_pass_accuracy = away_pass_accuracy = None
+        home_assists = away_assists = None
+
+        if stats_api:
+            # API retorna 2 entradas: [ {team:home, stats:[...]}, {team:away,...} ]
+            for item in stats_api:
+                team_id = item["team"]["id"]
+                entries = item["statistics"]
+
+                # helper convert
+                def val(key):
+                    for s in entries:
+                        if s["type"].lower() == key.lower():
+                            v = s["value"]
+                            if isinstance(v, str) and "%" in v:
+                                try:
+                                    return float(v.replace("%", ""))
+                                except:
+                                    return None
+                            return v
+                    return None
+
+                # HOME
+                if team_id == fx["teams"]["home"]["id"]:
+                    home_shots_total = val("Total Shots")
+                    home_shots_on_target = val("Shots on Goal")
+                    home_corners = val("Corner Kicks")
+                    home_yellow = val("Yellow Cards")
+                    home_red = val("Red Cards")
+                    home_possession = val("Ball Possession")
+                    home_pass_accuracy = val("Passes %")
+                    home_assists = val("Assists")
+
+                # AWAY
+                if team_id == fx["teams"]["away"]["id"]:
+                    away_shots_total = val("Total Shots")
+                    away_shots_on_target = val("Shots on Goal")
+                    away_corners = val("Corner Kicks")
+                    away_yellow = val("Yellow Cards")
+                    away_red = val("Red Cards")
+                    away_possession = val("Ball Possession")
+                    away_pass_accuracy = val("Passes %")
+                    away_assists = val("Assists")
+
+        # SALVAR NO FIXTURE
+        fix.home_shots_total = home_shots_total
+        fix.away_shots_total = away_shots_total
+
+        fix.home_shots_on_target = home_shots_on_target
+        fix.away_shots_on_target = away_shots_on_target
+
+        fix.home_corners = home_corners
+        fix.away_corners = away_corners
+
+        fix.home_yellow = home_yellow
+        fix.away_yellow = away_yellow
+
+        fix.home_red = home_red
+        fix.away_red = away_red
+
+        fix.home_possession = home_possession
+        fix.away_possession = away_possession
+
+        fix.home_pass_accuracy = home_pass_accuracy
+        fix.away_pass_accuracy = away_pass_accuracy
+
+        fix.home_assists = home_assists
+        fix.away_assists = away_assists
+        
+        
+        
+        # -----------------------------------
+        # ESTATÍSTICAS DO FIXTURE (FREE API)
+        # -----------------------------------
+        stats_api = None
+        if status not in ["NS", "TBD"]:
+            stats_api = api_get_fixture_statistics(api_id)
+
+        # valores default
+        home_stats = {}
+        away_stats = {}
+
+        # stats usadas no Fixture
+        fix_stats_home = {}
+        fix_stats_away = {}
+
+        if stats_api:
+            for item in stats_api:
+                team_api_id = item["team"]["id"]
+                entries = item["statistics"]
+
+                def val(key):
+                    for s in entries:
+                        if s["type"].lower() == key.lower():
+                            v = s["value"]
+                            if v is None:
+                                return None
+                            if isinstance(v, str) and "%" in v:
+                                try:
+                                    return float(v.replace("%",""))
+                                except:
+                                    return None
+                            return v
+                    return None
+
+                mapped = {
+                    "shots_total": val("Total Shots"),
+                    "shots_on_goal": val("Shots on Goal"),
+                    "shots_off_goal": val("Shots off Goal"),
+                    "blocked_shots": val("Blocked Shots"),
+                    "shots_inside_box": val("Shots insidebox"),
+                    "shots_outside_box": val("Shots outsidebox"),
+                    "possession": val("Ball Possession"),
+                    "corners": val("Corner Kicks"),
+                    "fouls": val("Fouls"),
+                    "yellow_cards": val("Yellow Cards"),
+                    "red_cards": val("Red Cards"),
+                    "saves": val("Goalkeeper Saves"),
+                    "total_passes": val("Total passes"),
+                    "accurate_passes": val("Passes accurate"),
+                    "pass_accuracy": val("Passes %"),
+                    "expected_goals": val("Expected Goals"),
+                    "dangerous_attacks": val("Dangerous Attacks"),
+                    "assists": val("Assists"),
+                }
+
+                # HOME
+                if team_api_id == fx["teams"]["home"]["id"]:
+                    home_stats = mapped
+
+                    # preencher Fixture
+                    fix_stats_home = {
+                        "home_shots_total": mapped["shots_total"],
+                        "home_shots_on_target": mapped["shots_on_goal"],
+                        "home_corners": mapped["corners"],
+                        "home_yellow": mapped["yellow_cards"],
+                        "home_red": mapped["red_cards"],
+                        "home_possession": mapped["possession"],
+                        "home_pass_accuracy": mapped["pass_accuracy"],
+                        "home_assists": mapped["assists"],
+                    }
+
+                # AWAY
+                if team_api_id == fx["teams"]["away"]["id"]:
+                    away_stats = mapped
+
+                    fix_stats_away = {
+                        "away_shots_total": mapped["shots_total"],
+                        "away_shots_on_target": mapped["shots_on_goal"],
+                        "away_corners": mapped["corners"],
+                        "away_yellow": mapped["yellow_cards"],
+                        "away_red": mapped["red_cards"],
+                        "away_possession": mapped["possession"],
+                        "away_pass_accuracy": mapped["pass_accuracy"],
+                        "away_assists": mapped["assists"],
+                    }
+
+        # Atualizar Fixture com as stats
+        for k, v in fix_stats_home.items():
+            setattr(fix, k, v)
+
+        for k, v in fix_stats_away.items():
+            setattr(fix, k, v)
+
+        # -----------------------------------
+        # SALVAR MatchStatistics (HOME & AWAY)
+        # -----------------------------------
+
+        if home_stats:
+            upsert_match_statistics(
+                db=db,
+                fixture_id=fix.id,
+                team_db_id=home_team.id,
+                stats={
+                    "shots_total": home_stats["shots_total"],
+                    "shots_on_goal": home_stats["shots_on_goal"],
+                    "shots_off_goal": home_stats["shots_off_goal"],
+                    "blocked_shots": home_stats["blocked_shots"],
+                    "shots_inside_box": home_stats["shots_inside_box"],
+                    "shots_outside_box": home_stats["shots_outside_box"],
+                    "possession": home_stats["possession"],
+                    "corners": home_stats["corners"],
+                    "fouls": home_stats["fouls"],
+                    "yellow_cards": home_stats["yellow_cards"],
+                    "red_cards": home_stats["red_cards"],
+                    "saves": home_stats["saves"],
+                    "total_passes": home_stats["total_passes"],
+                    "accurate_passes": home_stats["accurate_passes"],
+                    "pass_accuracy": home_stats["pass_accuracy"],
+                    "expected_goals": home_stats["expected_goals"],
+                    "dangerous_attacks": home_stats["dangerous_attacks"],
+                },
+            )
+
+        if away_stats:
+            upsert_match_statistics(
+                db=db,
+                fixture_id=fix.id,
+                team_db_id=away_team.id,
+                stats={
+                    "shots_total": away_stats["shots_total"],
+                    "shots_on_goal": away_stats["shots_on_goal"],
+                    "shots_off_goal": away_stats["shots_off_goal"],
+                    "blocked_shots": away_stats["blocked_shots"],
+                    "shots_inside_box": away_stats["shots_inside_box"],
+                    "shots_outside_box": away_stats["shots_outside_box"],
+                    "possession": away_stats["possession"],
+                    "corners": away_stats["corners"],
+                    "fouls": away_stats["fouls"],
+                    "yellow_cards": away_stats["yellow_cards"],
+                    "red_cards": away_stats["red_cards"],
+                    "saves": away_stats["saves"],
+                    "total_passes": away_stats["total_passes"],
+                    "accurate_passes": away_stats["accurate_passes"],
+                    "pass_accuracy": away_stats["pass_accuracy"],
+                    "expected_goals": away_stats["expected_goals"],
+                    "dangerous_attacks": away_stats["dangerous_attacks"],
+                },
+            )
 
         db.commit()
 

@@ -35,7 +35,7 @@ def health():
 #  BILHETE DO DIA — MODO NOTIFY (NÃO SALVA)
 # ====================================================================
 @app.get("/bilhete-do-dia")
-def bilhete_do_dia(mode: int = 1, target_odd: float = 1.15, days: int = 2):
+def bilhete_do_dia(mode: int = 1, target_odd: float = 1.15, days: int = 1):
     """
     Gera bilhete do dia em modo NOTIFY.
     NÃO salva no banco.
